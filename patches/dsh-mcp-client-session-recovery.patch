@@ -1,0 +1,52 @@
+--- a/lib/index.js	2026-10-15 21:31:31
++++ b/lib/index.js	2026-10-15 21:31:31
+@@ -468,6 +468,30 @@
+ 		maxDelayMs,
+ 		maxAttempts
+ 	});
++}
++/**
++* Bodies that name a vanished session, for the servers that answer `400`
++* instead of `404` when the id we send is no longer recognised.
++*/
++const SESSION_LOST_TEXT_PATTERN = /\b(?:no valid session|session(?:\s+id)?\b[^.]{0,40}?\b(?:missing|invalid|unknown|expired|not found|terminated|gone))\b/i;
++/**
++* Whether an error means the peer no longer recognises our session, as opposed
++* to this particular request being bad.
++*
++* Deliberately narrow: a false positive recycles a healthy generation. Only a
++* `404` — which the streamable-HTTP transport produces solely for a request that
++* carried a session id — and a `400` whose body names the session qualify.
++* Every other failure surfaces unchanged, exactly as before.
++*
++* @param error - Error reported by the transport or the SDK.
++* @returns Whether the session is gone and the connection should be recycled.
++*/
++function isSessionLostError(error) {
++	const status = error?.status ?? error?.data?.status;
++	if (status === 404) return true;
++	if (status !== 400) return false;
++	const text = error?.data?.text ?? error?.message ?? "";
++	return typeof text === "string" && SESSION_LOST_TEXT_PATTERN.test(text);
+ }
+ /**
+ * Start the supervised connection for one MCP server and keep it alive per
+@@ -619,6 +643,18 @@
+ 			closed.resolve();
+ 			if (attemptSettled) generationDown(generation);
+ 		};
++		/**
++		 * Session loss arrives as a request-level error, never as a close: when a
++		 * stateful server restarts, the id we still hold is rejected and the SDK
++		 * reports it through `onerror` while the transport stays open. Without
++		 * this subscription the supervisor never runs, the dead session id is
++		 * never replaced (only a successful handshake rewrites it), and every
++		 * tool call from this server fails for the remaining life of the Host.
++		 * Funnel it into the same disconnect path the close signal uses.
++		 */
++		generation.onerror = (error) => {
++			if (attemptSettled && isSessionLostError(error)) generationDown(generation);
++		};
+ 		/** Unattached probes close through their transport; attached clients must also report transport closure. */
+ 		async function closeGeneration() {
+ 			const attached = generation.transport !== void 0;
